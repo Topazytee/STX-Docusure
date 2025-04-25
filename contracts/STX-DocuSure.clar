@@ -104,3 +104,140 @@
     (ok (unwrap! (map-get? document-records { document-hash-id: document-hash-id })
         ERR-DOCUMENT-MISSING))
 )
+
+;; Read-only functions
+(define-read-only (get-document-details (document-hash-id (buff 32)))
+    (let ((validated-hash-id (try! (validate-and-sanitize-hash document-hash-id))))
+        (safe-get-document validated-hash-id))
+)
+
+(define-read-only (get-user-permissions (document-hash-id (buff 32)) (authorized-user principal))
+    (let (
+        (validated-hash-id (try! (validate-and-sanitize-hash document-hash-id)))
+        (validated-user (try! (check-principal authorized-user)))
+    )
+        (ok (default-to 
+            { document-viewing-permission: false, document-verification-permission: false }
+            (map-get? document-permissions 
+                { document-hash-id: validated-hash-id, authorized-user: validated-user })))
+    )
+)
+
+;; Public functions
+(define-public (register-new-document 
+    (document-hash-id (buff 32))
+    (document-content-hash (buff 32))
+    (document-metadata (string-utf8 256)))
+    (let (
+        (document-submitter tx-sender)
+        (validated-hash-id (unwrap! (validate-and-sanitize-hash document-hash-id) ERR-INVALID-DOCUMENT-HASH-ID))
+        (validated-content-hash (unwrap! (validate-and-sanitize-hash document-content-hash) ERR-INVALID-CONTENT-HASH))
+        (validated-metadata (unwrap! (validate-and-sanitize-metadata document-metadata) ERR-INVALID-METADATA))
+    )
+        ;; Check for duplicate document
+        (asserts! (is-none (map-get? document-records { document-hash-id: validated-hash-id }))
+            ERR-DUPLICATE-DOCUMENT)
+
+        (ok (map-set document-records
+            { document-hash-id: validated-hash-id }
+            {
+                document-owner: document-submitter,
+                document-content-hash: validated-content-hash,
+                submission-timestamp: block-height,
+                verification-status: STATUS-PENDING,
+                verification-authority: none,
+                document-metadata: validated-metadata,
+                document-version: u1,
+                verification-complete: false
+            }))
+    )
+)
+
+(define-public (modify-existing-document
+    (document-hash-id (buff 32))
+    (updated-content-hash (buff 32))
+    (updated-metadata (string-utf8 256)))
+    (let (
+        (validated-hash-id (unwrap! (validate-and-sanitize-hash document-hash-id) ERR-INVALID-DOCUMENT-HASH-ID))
+        (validated-content-hash (unwrap! (validate-and-sanitize-hash updated-content-hash) ERR-INVALID-CONTENT-HASH))
+        (validated-metadata (unwrap! (validate-and-sanitize-metadata updated-metadata) ERR-INVALID-METADATA))
+        (existing-doc (unwrap! (safe-get-document validated-hash-id) ERR-DOCUMENT-MISSING))
+    )
+        (asserts! (is-eq (get document-owner existing-doc) tx-sender)
+            ERR-UNAUTHORIZED-ACCESS)
+        (asserts! (not (get verification-complete existing-doc))
+            ERR-DOCUMENT-ALREADY-VERIFIED)
+
+        (ok (map-set document-records
+            { document-hash-id: validated-hash-id }
+            (merge existing-doc
+                {
+                    document-content-hash: validated-content-hash,
+                    document-metadata: validated-metadata,
+                    submission-timestamp: block-height,
+                    document-version: (+ (get document-version existing-doc) u1),
+                    verification-complete: false
+                })))
+    )
+)
+
+(define-public (perform-document-verification
+    (document-hash-id (buff 32)))
+    (let (
+        (validated-hash-id (unwrap! (validate-and-sanitize-hash document-hash-id) ERR-INVALID-DOCUMENT-HASH-ID))
+        (existing-doc (unwrap! (safe-get-document validated-hash-id) ERR-DOCUMENT-MISSING))
+        (permissions (unwrap! (get-user-permissions validated-hash-id tx-sender) ERR-PERMISSION-DENIED))
+    )
+        (asserts! (get document-verification-permission permissions)
+            ERR-UNAUTHORIZED-ACCESS)
+        (asserts! (not (get verification-complete existing-doc))
+            ERR-DOCUMENT-ALREADY-VERIFIED)
+
+        (ok (map-set document-records
+            { document-hash-id: validated-hash-id }
+            (merge existing-doc
+                {
+                    verification-status: STATUS-VERIFIED,
+                    verification-authority: (some tx-sender),
+                    verification-complete: true
+                })))
+    )
+)
+
+(define-public (assign-document-permissions
+    (document-hash-id (buff 32))
+    (authorized-user principal)
+    (grant-viewing-permission bool)
+    (grant-verification-permission bool))
+    (let (
+        (validated-hash-id (unwrap! (validate-and-sanitize-hash document-hash-id) ERR-INVALID-DOCUMENT-HASH-ID))
+        (validated-user (unwrap! (check-principal authorized-user) ERR-INVALID-AUTHORIZED-USER))
+        (existing-doc (unwrap! (safe-get-document validated-hash-id) ERR-DOCUMENT-MISSING))
+    )
+        (asserts! (is-eq (get document-owner existing-doc) tx-sender)
+            ERR-UNAUTHORIZED-ACCESS)
+
+        (ok (map-set document-permissions
+            { document-hash-id: validated-hash-id, authorized-user: validated-user }
+            { 
+                document-viewing-permission: grant-viewing-permission, 
+                document-verification-permission: grant-verification-permission 
+            }))
+    )
+)
+
+(define-public (remove-document-permissions
+    (document-hash-id (buff 32))
+    (authorized-user principal))
+    (let (
+        (validated-hash-id (unwrap! (validate-and-sanitize-hash document-hash-id) ERR-INVALID-DOCUMENT-HASH-ID))
+        (validated-user (unwrap! (check-principal authorized-user) ERR-INVALID-AUTHORIZED-USER))
+        (existing-doc (unwrap! (safe-get-document validated-hash-id) ERR-DOCUMENT-MISSING))
+    )
+        (asserts! (is-eq (get document-owner existing-doc) tx-sender)
+            ERR-UNAUTHORIZED-ACCESS)
+
+        (ok (map-delete document-permissions
+            { document-hash-id: validated-hash-id, authorized-user: validated-user }))
+    )
+)
